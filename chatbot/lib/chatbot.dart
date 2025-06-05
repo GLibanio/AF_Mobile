@@ -11,6 +11,16 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
+  final FirebaseFirestore firestore = FirebaseFirestore.instance;
+  final FirebaseAuth auth = FirebaseAuth.instance;
+
+  late DialogFlowtter dialogFlowtter;
+  String? userId;
+
+  bool isTyping = false;
+  String? selectedConversationId;
+  List<String> conversationIds = [];
+
   final List<String> mensagensIniciais = [
     "Olá! Como posso te ajudar hoje?",
     "Oi! O que você gostaria de conversar?",
@@ -19,18 +29,15 @@ class _ChatScreenState extends State<ChatScreen> {
     "Oi! Quer compartilhar algo comigo hoje?",
   ];
 
-  late DialogFlowtter dialogFlowtter;
-  final FirebaseFirestore firestore = FirebaseFirestore.instance;
-  final FirebaseAuth auth = FirebaseAuth.instance;
-
-  bool isTyping = false;
-  String? userId;
-
   @override
   void initState() {
     super.initState();
     _initializeDialogFlowtter();
     _authenticateUser();
+  }
+
+  Future<void> _initializeDialogFlowtter() async {
+    dialogFlowtter = await DialogFlowtter.fromFile();
   }
 
   Future<void> _authenticateUser() async {
@@ -39,17 +46,47 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         userId = userCredential.user?.uid;
       });
-      _sendInitialBotMessage();
+      await _loadConversations();
     } catch (e) {
       print('Erro ao autenticar: $e');
       setState(() {
-        userId = 'erro'; // Para não ficar preso no loading
+        userId = 'erro';
       });
     }
   }
 
-  Future<void> _initializeDialogFlowtter() async {
-    dialogFlowtter = await DialogFlowtter.fromFile();
+  Future<void> _loadConversations() async {
+    if (userId == null) return;
+    final snapshot = await firestore
+        .collection('chats')
+        .doc(userId)
+        .collection('conversations')
+        .get();
+
+    setState(() {
+      conversationIds = snapshot.docs.map((doc) => doc.id).toList();
+      if (conversationIds.isNotEmpty) {
+        selectedConversationId = conversationIds.first;
+      } else {
+        _createNewConversation();
+      }
+    });
+  }
+
+  Future<void> _createNewConversation() async {
+    if (userId == null) return;
+    final newConversation = await firestore
+        .collection('chats')
+        .doc(userId)
+        .collection('conversations')
+        .add({'createdAt': FieldValue.serverTimestamp()});
+
+    setState(() {
+      conversationIds.add(newConversation.id);
+      selectedConversationId = newConversation.id;
+    });
+
+    _sendInitialBotMessage();
   }
 
   void _sendInitialBotMessage() {
@@ -59,9 +96,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _addMessage(String sender, String text) async {
-    if (userId == null) return;
+    if (userId == null || selectedConversationId == null) return;
 
-    await firestore.collection('chats').doc(userId).collection('messages').add({
+    await firestore
+        .collection('chats')
+        .doc(userId)
+        .collection('conversations')
+        .doc(selectedConversationId)
+        .collection('messages')
+        .add({
       'sender': sender,
       'text': text,
       'timestamp': FieldValue.serverTimestamp(),
@@ -109,7 +152,6 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Row(
         mainAxisAlignment:
             isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser)
             Padding(
@@ -125,10 +167,9 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 color: isUser ? Colors.blue[100] : Colors.white,
                 borderRadius: BorderRadius.circular(15),
-                border:
-                    isUser
-                        ? Border.all(color: Colors.transparent)
-                        : Border.all(color: Colors.black87, width: 1.5),
+                border: isUser
+                    ? Border.all(color: Colors.transparent)
+                    : Border.all(color: Colors.black87, width: 1.5),
               ),
               child: Text(
                 message['text'] ?? '',
@@ -169,105 +210,125 @@ class _ChatScreenState extends State<ChatScreen> {
           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
         iconTheme: IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.add),
+            onPressed: _createNewConversation,
+            tooltip: "Nova conversa",
+          )
+        ],
       ),
-      body:
-          userId == null
-              ? Center(child: CircularProgressIndicator())
-              : Column(
-                children: [
-                  Expanded(
-                    child: StreamBuilder<QuerySnapshot>(
-                      stream:
-                          firestore
-                              .collection('chats')
-                              .doc(userId)
-                              .collection('messages')
-                              .orderBy('timestamp', descending: true)
-                              .snapshots(),
-                      builder: (context, snapshot) {
-                        if (!snapshot.hasData) {
-                          return Center(child: CircularProgressIndicator());
-                        }
-
-                        final messages = snapshot.data!.docs;
-
-                        return ListView.builder(
-                          padding: EdgeInsets.all(10),
-                          itemCount: messages.length + (isTyping ? 1 : 0),
-                          reverse: true,
-                          itemBuilder: (context, index) {
-                            if (isTyping && index == 0) {
-                              return buildMessage({
-                                'sender': 'bot',
-                                'text': 'Lótus está digitando...',
-                              });
-                            }
-                            final messageIndex = isTyping ? index - 1 : index;
-                            return buildMessage(
-                              messages[messageIndex].data()
-                                  as Map<String, dynamic>,
-                            );
-                          },
-                        );
-                      },
-                    ),
+      body: userId == null || selectedConversationId == null
+          ? Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: DropdownButton<String>(
+                    value: selectedConversationId,
+                    onChanged: (value) {
+                      setState(() {
+                        selectedConversationId = value;
+                      });
+                    },
+                    items: conversationIds.map((id) {
+                      return DropdownMenuItem(
+                        value: id,
+                        child: Text('Conversa ${conversationIds.indexOf(id)+1}'),
+                      );
+                    }).toList(),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Container(
-                            padding: EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(25),
-                            ),
-                            child: TextField(
-                              controller: _controller,
-                              style: TextStyle(color: Colors.black),
-                              decoration: InputDecoration(
-                                hintText: "Digite aqui...",
-                                hintStyle: TextStyle(color: Colors.black54),
-                                border: InputBorder.none,
-                              ),
-                              onSubmitted: (value) {
-                                if (value.trim().isNotEmpty) {
-                                  sendMessage(value.trim());
-                                  _controller.clear();
-                                }
-                              },
-                            ),
-                          ),
-                        ),
-                        SizedBox(width: 8),
-                        Container(
+                ),
+                Expanded(
+                  child: StreamBuilder<QuerySnapshot>(
+                    stream: firestore
+                        .collection('chats')
+                        .doc(userId)
+                        .collection('conversations')
+                        .doc(selectedConversationId)
+                        .collection('messages')
+                        .orderBy('timestamp', descending: true)
+                        .snapshots(),
+                    builder: (context, snapshot) {
+                      if (!snapshot.hasData) {
+                        return Center(child: CircularProgressIndicator());
+                      }
+
+                      final messages = snapshot.data!.docs;
+
+                      return ListView.builder(
+                        padding: EdgeInsets.all(10),
+                        itemCount: messages.length + (isTyping ? 1 : 0),
+                        reverse: true,
+                        itemBuilder: (context, index) {
+                          if (isTyping && index == 0) {
+                            return buildMessage({
+                              'sender': 'bot',
+                              'text': 'Lótus está digitando...',
+                            });
+                          }
+                          final messageIndex = isTyping ? index - 1 : index;
+                          return buildMessage(
+                            messages[messageIndex].data()
+                                as Map<String, dynamic>,
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.teal[400],
-                            shape: BoxShape.circle,
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(25),
                           ),
-                          child: IconButton(
-                            icon: Icon(Icons.send, color: Colors.white),
-                            onPressed: () {
-                              final text = _controller.text.trim();
-                              if (text.isNotEmpty) {
-                                sendMessage(text);
+                          child: TextField(
+                            controller: _controller,
+                            style: TextStyle(color: Colors.black),
+                            decoration: InputDecoration(
+                              hintText: "Digite aqui...",
+                              hintStyle: TextStyle(color: Colors.black54),
+                              border: InputBorder.none,
+                            ),
+                            onSubmitted: (value) {
+                              if (value.trim().isNotEmpty) {
+                                sendMessage(value.trim());
                                 _controller.clear();
                               }
                             },
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                      SizedBox(width: 8),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.teal[400],
+                          shape: BoxShape.circle,
+                        ),
+                        child: IconButton(
+                          icon: Icon(Icons.send, color: Colors.white),
+                          onPressed: () {
+                            final text = _controller.text.trim();
+                            if (text.isNotEmpty) {
+                              sendMessage(text);
+                              _controller.clear();
+                            }
+                          },
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
+            ),
     );
   }
 }
